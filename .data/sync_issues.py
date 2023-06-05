@@ -125,7 +125,8 @@ def process_directory(repo, path):
                 parent = issue_id
             else:
                 issue_id = int(file.name.replace(".md", ""))
-
+            
+            file._encoding = "base64"  # It can be anything, in order to skip calling the GitHub API
             body = file.decoded_content.decode("utf-8")
             auditor = body.split("\n")[0]
             issue_title = re.match(r"^(?:[#\s]+)(.*)$", body.split("\n")[4]).group(1)

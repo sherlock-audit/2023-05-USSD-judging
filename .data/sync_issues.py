@@ -4,7 +4,7 @@ import re
 import time
 from functools import lru_cache, wraps
 
-from github import Github, Issue, Repository
+from github import ContentFile, Github, Issue, Repository
 from github.GithubException import (
     GithubException,
     RateLimitExceededException,
@@ -59,6 +59,15 @@ class RepositoryExtended(Repository.Repository):
             setattr(repo, func, github_retry_on_rate_limit(getattr(repo, func)))
         return repo
 
+
+class ContentFileExtended(ContentFile.ContentFile):
+    @classmethod
+    def cast(cls, content_file: ContentFile):
+        content_file.__class__ = ContentFileExtended
+
+        for func in ["decoded_content", "encoding", "_completeIfNotSet"]:
+            setattr(content_file, func, github_retry_on_rate_limit(getattr(content_file, func)))
+        return content_file
 
 # Issues list. Each issue is in the format:
 # {
@@ -120,13 +129,13 @@ def process_directory(repo, path):
             files = [item]
 
         for file in files:
+            file = ContentFileExtended.cast(file)
             if "best" in file.name:
                 issue_id = int(file.name.replace("-best.md", ""))
                 parent = issue_id
             else:
                 issue_id = int(file.name.replace(".md", ""))
             
-            file._encoding = file._makeStringAttribute("base64")  # It can be anything, in order to skip calling the GitHub API
             body = file.decoded_content.decode("utf-8")
             auditor = body.split("\n")[0]
             issue_title = re.match(r"^(?:[#\s]+)(.*)$", body.split("\n")[4]).group(1)

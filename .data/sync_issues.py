@@ -69,6 +69,17 @@ class ContentFileExtended(ContentFile.ContentFile):
             setattr(content_file, func, github_retry_on_rate_limit(getattr(content_file, func)))
         return content_file
 
+class GithubExtended(Github):
+    @classmethod
+    def cast(cls, github: Github):
+        github.__class__ = GithubExtended
+
+        for func in ["get_repo"]:
+            setattr(github, func, github_retry_on_rate_limit(getattr(github, func)))
+        return github
+
+github = GithubExtended.cast(github)
+
 # Issues list. Each issue is in the format:
 # {
 #   "id": 1,  # corresponds to the issue 001

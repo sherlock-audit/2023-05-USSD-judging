@@ -65,7 +65,7 @@ class ContentFileExtended(ContentFile.ContentFile):
     def cast(cls, content_file: ContentFile):
         content_file.__class__ = ContentFileExtended
 
-        for func in ["decoded_content", "encoding", "_completeIfNotSet"]:
+        for func in ["_completeIfNotSet"]:
             setattr(content_file, func, github_retry_on_rate_limit(getattr(content_file, func)))
         return content_file
 

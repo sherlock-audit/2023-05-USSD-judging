@@ -176,7 +176,7 @@ def main():
 
     repo = RepositoryExtended.cast(github.get_repo(repo))
     
-        labels = [
+    labels = [
         {
             "name": "High",
             "color": "B60205",
@@ -261,7 +261,7 @@ def main():
     label_names = [x["name"] for x in labels]
 
     # Create the labels if it's the first time this action is run
-    if run_number == 2:
+    if run_number == 3:
         print("Creating issue labels")
         existing_labels = list(repo.get_labels())
         existing_label_names = [x.name for x in existing_labels]

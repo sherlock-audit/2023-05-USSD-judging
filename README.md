@@ -1,4 +1,192 @@
-# Issue H-1: `USSDRebalancer.sol#SellUSSDBuyCollateral` the check of whether collateral is DAI is wrong 
+# Issue H-1: `StableOracleDAI` calculates `getPriceUSD` with inverted base/rate tokens for Chainlink price 
+
+Source: https://github.com/sherlock-audit/2023-05-USSD-judging/issues/102 
+
+## Found by 
+0xPkhatri, 0xRobocop, 0xyPhilic, Bahurum, Brenzee, J4de, Juntao, Viktor\_Cortess, juancito, nobody2018, pengun, sashik\_eth, shaka, twicek
+## Summary
+
+`StableOracleDAI::getPriceUSD()` calculates the average price between the Uniswap pool price for a pair and the Chainlink feed as part of its result.
+
+The problem is that it uses `WETH/DAI` as the base/rate tokens for the pool, and `DAI/ETH` for the Chainlink feed, which is the opposite.
+
+This will incur in a huge price difference that will impact on the amount of USSD tokens being minted, while requesting the price from this oracle.
+
+## Vulnerability Detail
+
+In `StableOracleDAI::getPrice()` the `price` from the Chainlink feed `priceFeedDAIETH` returns the price as DAI/ETH.
+
+This can be checked on [Etherscan](https://etherscan.io/address/0x773616E4d11A78F511299002da57A0a94577F1f4#readContract#F10) and the [Chainlink Feeds Page](https://docs.chain.link/data-feeds/price-feeds/addresses/).
+
+Also note the comment on the code is misleading, as it is refering to another pair:
+
+> chainlink price data is 8 decimals for WETH/USD
+
+```solidity
+/// constructor
+24:    priceFeedDAIETH = AggregatorV3Interface(
+25:        0x773616E4d11A78F511299002da57A0a94577F1f4
+26:    );
+
+/// getPrice()
+46:    // chainlink price data is 8 decimals for WETH/USD, so multiply by 10 decimals to get 18 decimal fractional
+47:    //(uint80 roundID, int256 price, uint256 startedAt, uint256 timeStamp, uint80 answeredInRound) = priceFeedDAIETH.latestRoundData();
+48:    (, int256 price, , , ) = priceFeedDAIETH.latestRoundData();
+```
+
+[Link to code](https://github.com/sherlock-audit/2023-05-USSD/blob/main/ussd-contracts/contracts/oracles/StableOracleDAI.sol#L46-L48)
+
+On the other hand, the price coming from the Uniswap pool `DAIWethPrice` returns the price as `WETH/DAI`.
+
+Note that the relation WETH/DAI is given by the orders of the token addresses passed as arguments, being the first the base token, and the second the quote token.
+
+Also note that the variable name `DAIWethPrice` is misleading as well as the base/rate are the opposite (although this doesn't affect the code).
+
+```solidity
+    uint256 DAIWethPrice = DAIEthOracle.quoteSpecificPoolsWithTimePeriod(
+        1000000000000000000, // 1 Eth
+        0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2, // WETH (base token) // @audit
+        0x6B175474E89094C44Da98b954EedeAC495271d0F, // DAI (quote token) // @audit
+        pools, // DAI/WETH pool uni v3
+        600 // period
+    );
+```
+
+[Link to code](https://github.com/sherlock-audit/2023-05-USSD/blob/main/ussd-contracts/contracts/oracles/StableOracleDAI.sol#L36-L42)
+
+Finally, both values are used to calculate an average price of in `((DAIWethPrice + uint256(price) * 1e10) / 2)`.
+
+But as seen, one has price in `DAI/ETH` and the other one in `WETH/DAI`, which leads to an incorrect result.
+
+```solidity
+    return
+        (wethPriceUSD * 1e18) /
+        ((DAIWethPrice + uint256(price) * 1e10) / 2);
+```
+
+[Link to code](https://github.com/sherlock-audit/2023-05-USSD/blob/main/ussd-contracts/contracts/oracles/StableOracleDAI.sol#L50C15-L52)
+
+The average will be lower in this case, and the resulting price higher. 
+
+This will be used by `USSD::mintForToken()` for calculating the amount of tokens to mint for the user, and thus giving them much more than they should.
+
+Also worth mentioning that `USSDRebalancer::rebalance()` also relies on the result of this price calculation and will make it perform trades with incorrect values.
+
+## Impact
+
+Users will receive far more USSD tokens than they should when they call `mintForToken()`, ruining the token value.
+
+When performed the `USSDRebalancer::rebalance()`, all the calculations will be broken for the DAI oracle, leading to incorrect pool trades due to the error in `getPrice()`
+
+## Code Snippet
+
+- https://github.com/sherlock-audit/2023-05-USSD/blob/main/ussd-contracts/contracts/oracles/StableOracleDAI.sol#L46C28-L48
+- https://github.com/sherlock-audit/2023-05-USSD/blob/main/ussd-contracts/contracts/oracles/StableOracleDAI.sol#L36-L42
+- https://github.com/sherlock-audit/2023-05-USSD/blob/main/ussd-contracts/contracts/oracles/StableOracleDAI.sol#L50C15-L52
+
+## Tool used
+
+Manual Review
+
+## Recommendation
+
+Calculate the inverse of the `price` returned by the Chainlink feed so that it can be averaged with the pool price, making sure that both use the correct `WETH/DAI` and `ETH/DAI` base/rate tokens.
+
+
+
+
+
+## Discussion
+
+**T1MOH593**
+
+Escalate for 10 USDC
+
+This is not a duplicate of https://github.com/sherlock-audit/2023-05-USSD-judging/issues/909.
+It tells about using DAI/ETH instead of ETH/DAI on Chainlink. And #909 tells about completely different issue with oracles
+
+**sherlock-admin**
+
+ > Escalate for 10 USDC
+> 
+> This is not a duplicate of https://github.com/sherlock-audit/2023-05-USSD-judging/issues/909.
+> It tells about using DAI/ETH instead of ETH/DAI on Chainlink. And #909 tells about completely different issue with oracles
+
+You've created a valid escalation for 10 USDC!
+
+To remove the escalation from consideration: Delete your comment.
+
+You may delete or edit your escalation comment anytime before the 48-hour escalation window closes. After that, the escalation becomes final.
+
+**0xJuancito**
+
+Escalate for 10 USDC
+
+Agree with the previous comment. 
+
+This is an **independent High** impact finding. It is not a duplicate of https://github.com/sherlock-audit/2023-05-USSD-judging/issues/909, and hasn't been exposed by other findings selected for report.
+
+It's main point is explained on the Summary:
+
+> The problem is that it uses WETH/DAI as the base/rate tokens for the pool, and DAI/ETH for the Chainlink feed, which is the opposite.
+
+A more detailed explanation and recommendation to fix it is included on the rest of the report.
+
+Possible duplicates:
+
+- https://github.com/sherlock-audit/2023-05-USSD-judging/issues/795
+- https://github.com/sherlock-audit/2023-05-USSD-judging/issues/774
+- https://github.com/sherlock-audit/2023-05-USSD-judging/issues/491
+- https://github.com/sherlock-audit/2023-05-USSD-judging/issues/269
+
+**sherlock-admin**
+
+ > Escalate for 10 USDC
+> 
+> Agree with the previous comment. 
+> 
+> This is an **independent High** impact finding. It is not a duplicate of https://github.com/sherlock-audit/2023-05-USSD-judging/issues/909, and hasn't been exposed by other findings selected for report.
+> 
+> It's main point is explained on the Summary:
+> 
+> > The problem is that it uses WETH/DAI as the base/rate tokens for the pool, and DAI/ETH for the Chainlink feed, which is the opposite.
+> 
+> A more detailed explanation and recommendation to fix it is included on the rest of the report.
+> 
+> Possible duplicates:
+> 
+> - https://github.com/sherlock-audit/2023-05-USSD-judging/issues/795
+> - https://github.com/sherlock-audit/2023-05-USSD-judging/issues/774
+> - https://github.com/sherlock-audit/2023-05-USSD-judging/issues/491
+> - https://github.com/sherlock-audit/2023-05-USSD-judging/issues/269
+
+You've created a valid escalation for 10 USDC!
+
+To remove the escalation from consideration: Delete your comment.
+
+You may delete or edit your escalation comment anytime before the 48-hour escalation window closes. After that, the escalation becomes final.
+
+**ctf-sec**
+
+See my comments in https://github.com/sherlock-audit/2023-05-USSD-judging/issues/555
+
+**hrishibhat**
+
+Result:
+High
+Has duplicates 
+This is a valid separate issue.
+
+
+**sherlock-admin**
+
+Escalations have been resolved successfully!
+
+Escalation status:
+- [T1MOH593](https://github.com/sherlock-audit/2023-05-USSD-judging/issues/102/#issuecomment-1604525700): accepted
+- [0xJuancito](https://github.com/sherlock-audit/2023-05-USSD-judging/issues/102/#issuecomment-1605034302): accepted
+
+# Issue H-2: `USSDRebalancer.sol#SellUSSDBuyCollateral` the check of whether collateral is DAI is wrong 
 
 Source: https://github.com/sherlock-audit/2023-05-USSD-judging/issues/193 
 
@@ -51,12 +239,12 @@ Manual Review
       }
 ```
 
-# Issue H-2: The getOwnValuation() function contains errors in the price calculation 
+# Issue H-3: The getOwnValuation() function contains errors in the price calculation 
 
 Source: https://github.com/sherlock-audit/2023-05-USSD-judging/issues/222 
 
 ## Found by 
-0xpinky, AlexCzm, Bauer, J4de, T1MOH, carrotsmuggler, kiki\_dev, peanuts, sam\_gmk, sashik\_eth, simon135, theOwl, twicek, warRoom
+0xPkhatri, 0xpinky, AlexCzm, Bauer, J4de, carrotsmuggler, kiki\_dev, peanuts, sam\_gmk, sashik\_eth, simon135, theOwl, twicek, warRoom
 ## Summary
 The getOwnValuation() function in the provided code has incorrect price calculation logic when token0() or token1() is equal to USSD. The error leads to inaccurate price calculations.
 
@@ -105,12 +293,12 @@ price = uint(sqrtPriceX96)*(uint(sqrtPriceX96))*(1e6 /* 1e12 + 1e6 decimal repre
         price = (1e24 / price) / 1e12;
 ```
 
-# Issue H-3: The price from `StableOracleDAI` is returned with the incorrect number of decimals 
+# Issue H-4: The price from `StableOracleDAI` is returned with the incorrect number of decimals 
 
 Source: https://github.com/sherlock-audit/2023-05-USSD-judging/issues/236 
 
 ## Found by 
-0xPkhatri, 0xRobocop, 0xStalin, 0xeix, 0xlmanini, Bahurum, Brenzee, Dug, G-Security, J4de, PNS, Proxy, SanketKogekar, T1MOH, Vagner, WATCHPUG, ast3ros, ctf\_sec, immeas, juancito, kutugu, n33k, nobody2018, peanuts, pengun, qbs, qpzm, saidam017, sam\_gmk, sashik\_eth, twicek
+0xStalin, 0xeix, 0xlmanini, Bahurum, Brenzee, Dug, G-Security, PNS, Proxy, SanketKogekar, T1MOH, Vagner, WATCHPUG, ast3ros, ctf\_sec, immeas, juancito, kutugu, n33k, peanuts, pengun, qbs, qpzm, saidam017, sam\_gmk, sashik\_eth, twicek
 ## Summary
 
 The price returned from the `getPriceUSD` function of the `StableOracleDAI` is scaled up by `1e10`, which results in 28 decimals instead of the intended 18.
@@ -172,7 +360,7 @@ Remove the `* 1e10` from the return statement.
 +   return (wethPriceUSD * 1e18) / (DAIWethPrice + uint256(price) / 2);
 ```
 
-# Issue H-4: Price calculation susceptible to flashloan exploits 
+# Issue H-5: Price calculation susceptible to flashloan exploits 
 
 Source: https://github.com/sherlock-audit/2023-05-USSD-judging/issues/451 
 
@@ -206,7 +394,7 @@ Manual Review
 
 Use TWAP price instead of `slot0` price. [Here](https://github.com/charmfinance/alpha-vaults-contracts/blob/07db2b213315eea8182427be4ea51219003b8c1a/contracts/AlphaStrategy.sol#L136-L144) is an example implementation of TWAP.
 
-# Issue H-5: Wrong computation of the amountToSellUnit variable 
+# Issue H-6: Wrong computation of the amountToSellUnit variable 
 
 Source: https://github.com/sherlock-audit/2023-05-USSD-judging/issues/535 
 
@@ -252,7 +440,7 @@ Manual Review
 
 Delete the last 1e18 factor
 
-# Issue H-6: Not using slippage parameter or deadline while swapping on UniswapV3 
+# Issue H-7: Not using slippage parameter or deadline while swapping on UniswapV3 
 
 Source: https://github.com/sherlock-audit/2023-05-USSD-judging/issues/673 
 
@@ -289,12 +477,12 @@ Manual Review
 
 Use parameters `amountOutMinimum` and `deadline` correctly to avoid loss of funds.
 
-# Issue H-7: Lack of access control for `mintRebalancer()` and `burnRebalancer()` 
+# Issue H-8: Lack of access control for `mintRebalancer()` and `burnRebalancer()` 
 
 Source: https://github.com/sherlock-audit/2023-05-USSD-judging/issues/777 
 
 ## Found by 
-0x2e, 0xAzez, 0xHati, 0xMojito, 0xPkhatri, 0xRobocop, 0xSmartContract, 0xStalin, 0xeix, 0xyPhilic, 14si2o\_Flint, AlexCzm, Angry\_Mustache\_Man, Aymen0909, Bahurum, Bauchibred, Bauer, BlockChomper, Brenzee, BugBusters, BugHunter101, Delvir0, DevABDee, Dug, Fanz, GimelSec, HonorLt, J4de, JohnnyTime, Juntao, Kodyvim, Kose, Lilyjjo, Madalad, Nyx, PokemonAuditSimulator, RaymondFam, Saeedalipoor01988, SanketKogekar, Schpiel, SensoYard, T1MOH, TheNaubit, Tricko, VAD37, Vagner, WATCHPUG, \_\_141345\_\_, anthony, ast3ros, auditsea, berlin-101, blackhole, blockdev, carrotsmuggler, chainNue, chalex.eth, cjm00n, coincoin, coryli, ctf\_sec, curiousapple, dacian, evilakela, georgits, giovannidisiena, immeas, innertia, jah, juancito, kie, kiki\_dev, kutugu, lil.eth, m4ttm, mahdikarimi, mrpathfindr, n33k, neumo, ni8mare, nobody2018, pavankv241, pengun, qbs, qckhp, qpzm, ravikiran.web3, saidam017, sam\_gmk, sashik\_eth, shaka, shealtielanz, shogoki, simon135, slightscan, smiling\_heretic, tallo, theOwl, the\_endless\_sea, toshii, tsvetanovv, tvdung94, twcctop, twicek, vagrant, ver0759, warRoom, whiteh4t9527, ww4tson, yy
+0x2e, 0xAzez, 0xHati, 0xMojito, 0xPkhatri, 0xRobocop, 0xSmartContract, 0xStalin, 0xeix, 0xyPhilic, 14si2o\_Flint, AlexCzm, Angry\_Mustache\_Man, Aymen0909, Bahurum, Bauchibred, Bauer, BlockChomper, Brenzee, BugBusters, BugHunter101, Delvir0, DevABDee, Dug, Fanz, GimelSec, HonorLt, J4de, JohnnyTime, Juntao, Kodyvim, Kose, Lilyjjo, Madalad, Nyx, PokemonAuditSimulator, RaymondFam, Saeedalipoor01988, SanketKogekar, Schpiel, SensoYard, T1MOH, TheNaubit, Tricko, VAD37, Vagner, WATCHPUG, \_\_141345\_\_, anthony, ast3ros, auditsea, berlin-101, blackhole, blockdev, carrotsmuggler, chainNue, chalex.eth, cjm00n, coincoin, coryli, ctf\_sec, curiousapple, dacian, evilakela, georgits, giovannidisiena, immeas, innertia, jah, juancito, kie, kiki\_dev, lil.eth, m4ttm, mahdikarimi, mrpathfindr, n33k, neumo, ni8mare, nobody2018, pavankv241, pengun, qbs, qckhp, qpzm, ravikiran.web3, saidam017, sam\_gmk, sashik\_eth, shaka, shealtielanz, shogoki, simon135, slightscan, smiling\_heretic, tallo, theOwl, the\_endless\_sea, toshii, tsvetanovv, tvdung94, twcctop, twicek, vagrant, ver0759, warRoom, whiteh4t9527, ww4tson, yy
 ## Summary
 
 Lack of access control in `USSD.mintRebalancer()` and `USSD.burnRebalancer()` can lead to a denial-of-service attack and malfunction of the rebalancer as it can alter `totalSupply`, which is used in `rebalancer.SellUSSDBuyCollateral` to calculate `ownval`.
@@ -377,12 +565,12 @@ Manual Review
 
 `USSD.mintRebalancer()` should be `onlyBalancer`.
 
-# Issue H-8: Uniswap v3 pool token balance proportion does not necessarily correspond to the price, and it is easy to manipulate. 
+# Issue H-9: Uniswap v3 pool token balance proportion does not necessarily correspond to the price, and it is easy to manipulate. 
 
 Source: https://github.com/sherlock-audit/2023-05-USSD-judging/issues/808 
 
 ## Found by 
-WATCHPUG
+0xRan4212, Bahurum, VAD37, WATCHPUG, curiousapple, mahdikarimi, n33k, nobody2018, simon135
 ## Summary
 
 `getSupplyProportion()` retrieves Uniswap v3 pool balances, but the proportion of pool tokens doesn't always correspond to the price. If `ownval` is less than `1e6 - threshold`, `USSDamount` may be lower than `DAIamount`, causing L97 `USSDamount - DAIamount` to revert due to underflow. Proportion can be easily manipulated, which can be exploited by attackers.
@@ -426,12 +614,142 @@ Manual Review
 
 Instead of using the pool balances to calculate the delta amount required to restore the peg, a more complex formula that considers the liquidity range should be used.
 
-# Issue H-9: Wrong Oracle feed addresses 
+
+
+## Discussion
+
+**0xJuancito**
+
+Escalate for 10 USDC
+
+This issue is already addressed on #451 and its duplicates
+
+All of them refer to manipulation of Uniswap v3 pool and calling `rebalance()` to manipulate USSD price. Other duplicate findings address the same issue as here with `getSupplyProportion ()` as well, like https://github.com/sherlock-audit/2023-05-USSD-judging/issues/92, https://github.com/sherlock-audit/2023-05-USSD-judging/issues/731, https://github.com/sherlock-audit/2023-05-USSD-judging/issues/733 just to give some examples.
+
+**sherlock-admin**
+
+ > Escalate for 10 USDC
+> 
+> This issue is already addressed on #451 and its duplicates
+> 
+> All of them refer to manipulation of Uniswap v3 pool and calling `rebalance()` to manipulate USSD price. Other duplicate findings address the same issue as here with `getSupplyProportion ()` as well, like https://github.com/sherlock-audit/2023-05-USSD-judging/issues/92, https://github.com/sherlock-audit/2023-05-USSD-judging/issues/731, https://github.com/sherlock-audit/2023-05-USSD-judging/issues/733 just to give some examples.
+
+You've created a valid escalation for 10 USDC!
+
+To remove the escalation from consideration: Delete your comment.
+
+You may delete or edit your escalation comment anytime before the 48-hour escalation window closes. After that, the escalation becomes final.
+
+**bahurum**
+
+Escalate for 10 USDC
+
+This isssue  is not a duplicate of #451 as claimed by @0xJuancito.
+
+The problem here is not the usage of `slot0()` but calculating the price of a Uniswap V3 pool as ratio of pool reserves, which is fundamentally wrong.
+Also, while this issue allows an attack vector which involves manipulation of the price of the pool, the issue already exists without manipulation as the rebalancing will be completely off or would not work at all, and this for any normal non-manipulated pool.
+
+
+**sherlock-admin**
+
+ > Escalate for 10 USDC
+> 
+> This isssue  is not a duplicate of #451 as claimed by @0xJuancito.
+> 
+> The problem here is not the usage of `slot0()` but calculating the price of a Uniswap V3 pool as ratio of pool reserves, which is fundamentally wrong.
+> Also, while this issue allows an attack vector which involves manipulation of the price of the pool, the issue already exists without manipulation as the rebalancing will be completely off or would not work at all, and this for any normal non-manipulated pool.
+> 
+
+You've created a valid escalation for 10 USDC!
+
+To remove the escalation from consideration: Delete your comment.
+
+You may delete or edit your escalation comment anytime before the 48-hour escalation window closes. After that, the escalation becomes final.
+
+**0xJuancito**
+
+Escalate for 10 USDC
+
+For clarification from my previous comment, I'm pointing that many issues have been judged as a duplicate of #451 as stated on my comment due to this root cause as well, not necessarily with `slot0`, but the current use of the pool.
+
+> This issue is already addressed on https://github.com/sherlock-audit/2023-05-USSD-judging/issues/451 and its duplicates
+
+Just to give some examples:
+
+- https://github.com/sherlock-audit/2023-05-USSD-judging/issues/731
+
+> getSupplyProportion uses Uniswap V3 pool tokens balances which are easily manipulated. The protocol rebalances the USSD/DAI token proportion to 50/50 to rebalance the USSD/DAI price. This works for Uniswap V2 pools but does not work for Uniswap V3 pools.
+
+- https://github.com/sherlock-audit/2023-05-USSD-judging/issues/733
+
+> The getSupplyProportion() function, using the balanceOf() function, is designed to maintain the balance of the USSD/DAI pool in order to stabilize the USSD value at $1.
+
+> However, this balance can be manipulated, particularly through UniswapPool flashloan, which facilitates the alteration of the balanceOf() value of both USSD and DAI in the pool. This then tricks the USSDRebalancer.rebalance() function into swapping half the total pool value.
+
+My suggestion is to keep the consistency in the judging and group them all, as similar issues have been already grouped under #451.
+
+**sherlock-admin**
+
+ > Escalate for 10 USDC
+> 
+> For clarification from my previous comment, I'm pointing that many issues have been judged as a duplicate of #451 as stated on my comment due to this root cause as well, not necessarily with `slot0`, but the current use of the pool.
+> 
+> > This issue is already addressed on https://github.com/sherlock-audit/2023-05-USSD-judging/issues/451 and its duplicates
+> 
+> Just to give some examples:
+> 
+> - https://github.com/sherlock-audit/2023-05-USSD-judging/issues/731
+> 
+> > getSupplyProportion uses Uniswap V3 pool tokens balances which are easily manipulated. The protocol rebalances the USSD/DAI token proportion to 50/50 to rebalance the USSD/DAI price. This works for Uniswap V2 pools but does not work for Uniswap V3 pools.
+> 
+> - https://github.com/sherlock-audit/2023-05-USSD-judging/issues/733
+> 
+> > The getSupplyProportion() function, using the balanceOf() function, is designed to maintain the balance of the USSD/DAI pool in order to stabilize the USSD value at $1.
+> 
+> > However, this balance can be manipulated, particularly through UniswapPool flashloan, which facilitates the alteration of the balanceOf() value of both USSD and DAI in the pool. This then tricks the USSDRebalancer.rebalance() function into swapping half the total pool value.
+> 
+> My suggestion is to keep the consistency in the judging and group them all, as similar issues have been already grouped under #451.
+
+You've created a valid escalation for 10 USDC!
+
+To remove the escalation from consideration: Delete your comment.
+
+You may delete or edit your escalation comment anytime before the 48-hour escalation window closes. After that, the escalation becomes final.
+
+**ctf-sec**
+
+Consider this not a duplicate of #451 
+
+and will redo some duplicate later
+
+**0xRan4212**
+
+Escalate for 10 USDC
+
+https://github.com/sherlock-audit/2023-05-USSD-judging/issues/931 is a dup of this issue.
+
+**hrishibhat**
+
+Result:
+High
+Has duplicates
+This issue is not a duplicate of #451, some of the duplications are changed accordingly. 
+
+**sherlock-admin**
+
+Escalations have been resolved successfully!
+
+Escalation status:
+- [0xJuancito](https://github.com/sherlock-audit/2023-05-USSD-judging/issues/808/#issuecomment-1605929297): accepted
+- [bahurum](https://github.com/sherlock-audit/2023-05-USSD-judging/issues/808/#issuecomment-1605947205): accepted
+- [0xJuancito](https://github.com/sherlock-audit/2023-05-USSD-judging/issues/808/#issuecomment-1606170316): accepted
+
+# Issue H-10: Wrong Oracle feed addresses 
 
 Source: https://github.com/sherlock-audit/2023-05-USSD-judging/issues/817 
 
 ## Found by 
-0xGusMcCrae, 0xHati, 0xPkhatri, 0xRobocop, 0xStalin, 0xeix, 0xlmanini, 0xyPhilic, 14si2o\_Flint, ADM, Aymen0909, Bahurum, Bauchibred, Bauer, BenRai, Brenzee, BugHunter101, Delvir0, DevABDee, Dug, G-Security, GimelSec, HonorLt, J4de, JohnnyTime, Juntao, Kirkeelee, Kodyvim, Kose, Lilyjjo, Madalad, PNS, PTolev, PokemonAuditSimulator, Proxy, RaymondFam, Saeedalipoor01988, SaharDevep, Schpiel, SensoYard, T1MOH, TheNaubit, Vagner, Viktor\_Cortess, WATCHPUG, \_\_141345\_\_, ashirleyshe, ast3ros, berlin-101, blockdev, chainNue, chalex.eth, ck, ctf\_sec, curiousapple, dacian, evilakela, giovannidisiena, immeas, innertia, juancito, kie, kiki\_dev, kutugu, lil.eth, martin, mrpathfindr, neumo, ni8mare, nobody2018, peanuts, pengun, qpzm, ravikiran.web3, saidam017, sakshamguruji, sam\_gmk, sashik\_eth, shaka, shogoki, simon135, theOwl, the\_endless\_sea, toshii, twicek, ustas, whiteh4t9527
+0xGusMcCrae, 0xHati, 0xPkhatri, 0xRobocop, 0xStalin, 0xeix, 0xlmanini, 0xyPhilic, 14si2o\_Flint, ADM, Aymen0909, Bahurum, Bauchibred, Bauer, BenRai, Brenzee, BugHunter101, Delvir0, DevABDee, Dug, G-Security, GimelSec, HonorLt, J4de, JohnnyTime, Juntao, Kirkeelee, Kodyvim, Kose, Lilyjjo, Madalad, PNS, PTolev, PokemonAuditSimulator, Proxy, Saeedalipoor01988, SaharDevep, Schpiel, SensoYard, T1MOH, TheNaubit, Vagner, Viktor\_Cortess, WATCHPUG, \_\_141345\_\_, ashirleyshe, ast3ros, berlin-101, blockdev, chainNue, chalex.eth, ck, ctf\_sec, curiousapple, dacian, evilakela, giovannidisiena, immeas, innertia, juancito, kie, kiki\_dev, kutugu, lil.eth, martin, mrpathfindr, neumo, ni8mare, nobody2018, peanuts, pengun, qpzm, ravikiran.web3, saidam017, sakshamguruji, sam\_gmk, sashik\_eth, shaka, shogoki, simon135, theOwl, the\_endless\_sea, toshii, twicek, ustas, whiteh4t9527
 ## Summary
 
 Wrong Oracle feed addresses will result in wrong prices.
@@ -466,51 +784,12 @@ Manual Review
 
 Use correct addresses.
 
-# Issue H-10: Using WBGL as collateral poses systemic risk to the USSD stablecoin. 
-
-Source: https://github.com/sherlock-audit/2023-05-USSD-judging/issues/822 
-
-## Found by 
-0xSmartContract, CodeFoxInc, WATCHPUG, \_\_141345\_\_, ctf\_sec, giovannidisiena, juancito, n33k, qckhp, sashik\_eth, shaka, simon135
-## Summary
-
-WBGL has low liquidity and accepting it as collateral without limit can lead to severe depeg of the stablecoin, allowing attackers to manipulate the price and dump other collateral assets for profit. This is due to the ease of manipulating the price of WBGL.
-
-## Vulnerability Detail
-
-WBGL is a small-cap token with very thin liquidity.
-
-Accepting WBGL as collateral without a cap, ie, allows users to mint as much as they want at the easily manipulated price, which can result in severe depeg of the stablecoin. 
-
-## Impact
-
-Specifically, an attacker could:
-
-1. manipulate the price of WBGL to a higher price;
-2. mint and dump part of the USSD for DAI;
-3. trigger a rebalance, sell the collateral assets to pump the USSD price;
-4. dump the rest from step 2 for more DAI.
-
-The root cause of this issue is the thin liquidity of WBGL, which makes it easy to manipulate its price.
-
-## Code Snippet
-
-https://github.com/sherlock-audit/2023-05-USSD/blob/main/ussd-contracts/contracts/oracles/StableOracleWBGL.sol#L24-L39
-
-## Tool used
-
-Manual Review
-
-## Recommendation
-
-Remove WBGL from the list of collateral. Or, adding a cap for using WBGL as the collateral to mint USSD, say, no more than 1/10th of the liquidity of WBGL.
-
 # Issue H-11: Oracle price should be denominated in DAI instead of USD 
 
 Source: https://github.com/sherlock-audit/2023-05-USSD-judging/issues/909 
 
 ## Found by 
-Bahurum, Bauer, Brenzee, Viktor\_Cortess, WATCHPUG, ast3ros, juancito, pengun
+T1MOH, WATCHPUG
 ## Summary
 
 ## Vulnerability Detail
@@ -554,33 +833,61 @@ Change the unit of Oracle price from USD to DAI.
 
 Or, change the peg target from DAI to USD, which means the `getOwnValuation()` should not be used as the peg deviation check standard.
 
-# Issue H-12: Lack of Redeem Feature 
 
-Source: https://github.com/sherlock-audit/2023-05-USSD-judging/issues/958 
 
-## Found by 
-0xMosh, 0xRobocop, BugBusters, WATCHPUG, ast3ros, ctf\_sec, juancito, sashik\_eth, shealtielanz, shogoki, the\_endless\_sea, ustas
-## Summary
+## Discussion
 
-## Vulnerability Detail
+**0xJuancito**
 
-The whitepaper mentions a redeeming feature that allows the user to redeem USSD for DAI (see section 4 "Mint and redeem"), but it is currently missing from the implementation.
+Escalate for 10 USDC
 
-Although there is a "redeem" boolean in the collateral settings, there is no corresponding feature that enables the redemption of USSD to any of the underlying collateral assets.
+The report assumes that the attacker would be able to sell 1100 USSD for 1100 DAI:
 
-## Impact
+> 2. Sell 1100 USSD for 1100 DAI, driving the USSD to a lower price against DAI, say 1 USSD to 0.98 DAI.
 
-## Code Snippet
+This wouldn't be possible, as the USSD/DAI pool would be arbitraged and the attacker will only be losing money on each mint. It also assumes manipulating the price, which is already mentioned in https://github.com/sherlock-audit/2023-05-USSD-judging/issues/451.
 
-https://github.com/sherlock-audit/2023-05-USSD/blob/main/ussd-contracts/contracts/interfaces/IUSSDRebalancer.sol#L13-L21
+This can be considered either informational or a duplicate
 
-## Tool used
+**sherlock-admin**
 
-Manual Review
+ > Escalate for 10 USDC
+> 
+> The report assumes that the attacker would be able to sell 1100 USSD for 1100 DAI:
+> 
+> > 2. Sell 1100 USSD for 1100 DAI, driving the USSD to a lower price against DAI, say 1 USSD to 0.98 DAI.
+> 
+> This wouldn't be possible, as the USSD/DAI pool would be arbitraged and the attacker will only be losing money on each mint. It also assumes manipulating the price, which is already mentioned in https://github.com/sherlock-audit/2023-05-USSD-judging/issues/451.
+> 
+> This can be considered either informational or a duplicate
 
-## Recommendation
+You've created a valid escalation for 10 USDC!
 
-Revise the whitepaper and docs to reflect the fact that there is no redeem function or add a redeem function.
+To remove the escalation from consideration: Delete your comment.
+
+You may delete or edit your escalation comment anytime before the 48-hour escalation window closes. After that, the escalation becomes final.
+
+**ctf-sec**
+
+Emm do not see why this is not possible
+
+> Sell 1100 USSD for 1100 DAI, driving the USSD to a lower price against DAI, say 1 USSD to 0.98 DAI.
+
+the attack path described is still valid in the original report
+
+**hrishibhat**
+
+Result:
+High
+Has duplicates
+The attack is possible and the rebalance is design to create maintain the 1:1 ratio between USSD to DAI.
+
+**sherlock-admin**
+
+Escalations have been resolved successfully!
+
+Escalation status:
+- [0xJuancito](https://github.com/sherlock-audit/2023-05-USSD-judging/issues/909/#issuecomment-1605924088): rejected
 
 # Issue M-1: Calls to Oracles don't check for stale prices 
 
@@ -627,7 +934,7 @@ if (updatedAt < block.timestamp - 60 * 60 /* 1 hour */) {
 Source: https://github.com/sherlock-audit/2023-05-USSD-judging/issues/97 
 
 ## Found by 
-Aymen0909, GimelSec, Kose, cryptostellar5, qbs, shealtielanz
+0xRobocop, Aymen0909, GimelSec, Kose, cryptostellar5, qbs, shealtielanz
 ## Summary
 Missing slippage parameter in ```mintForToken()``` makes it vulnerable to front-run attacks and exposes users to unwanted slippage.
 ## Vulnerability Detail
@@ -664,12 +971,35 @@ Manual Review
 ## Recommendation
 Consider adding a ```minAmountOut``` parameter.
 
+
+
+## Discussion
+
+**sherlock-admin**
+
+> Removed: comment left for traceability 
+> I think this is not a valid medium. 
+> As the mintForToken function uses oracle prices, which return a weighted average price, it should not be that easy manipulated by Frontrunning.
+
+    You've deleted an escalation for this issue.
+
+**kosedogus**
+
+> Escalate for 10USDC I think this is not a valid medium. As the mintForToken function uses oracle prices, which return a weighted average price, it should not be that easy manipulated by Frontrunning.
+
+Weighted average prices does not guarantee that trades (minting in this case)  executed based on the average price will be free from slippage. TWAP's are obviously vulnerable to slippage attacks. I also would like to remind that there is another valid issue due to the lack of slippage parameter in uniRouter. (That function also uses TWAP) 
+
+**Shogoki**
+
+Okay, I think you are right.
+I removed the escalation 
+
 # Issue M-3: rebalance process incase of  selling the collateral, could revert because of underflow calculation 
 
 Source: https://github.com/sherlock-audit/2023-05-USSD-judging/issues/111 
 
 ## Found by 
-0xHati, 0xRobocop, Dug, GimelSec, J4de, Juntao, PokemonAuditSimulator, T1MOH, WATCHPUG, XDZIBEC, ast3ros, nobody2018, saidam017, toshii, tsvetanovv, twicek
+0xHati, Dug, GimelSec, Juntao, PokemonAuditSimulator, T1MOH, WATCHPUG, XDZIBEC, ast3ros, saidam017, toshii, tsvetanovv, twicek
 ## Summary
 
 rebalance process, will try to sell the collateral in case of peg-down. However, the process can revert because the calculation can underflow.
@@ -755,40 +1085,185 @@ Check if `(IERC20Upgradeable(baseAsset).balanceOf(USSD) - amountBefore)` > `amou
 
 This is a valid medium
 
-# Issue M-4: `USSD.sol#initialize` mint without deposit collateral 
+# Issue M-4: StableOracleWBTC use BTC/USD chainlink oracle to price WBTC which is problematic if WBTC depegs 
 
-Source: https://github.com/sherlock-audit/2023-05-USSD-judging/issues/177 
+Source: https://github.com/sherlock-audit/2023-05-USSD-judging/issues/310 
 
 ## Found by 
-0xGusMcCrae, BugBusters, J4de, immeas, sakshamguruji, sam\_gmk
+Bahurum, Bauchibred, BenRai, RaymondFam, Schpiel, T1MOH, \_\_141345\_\_, chainNue, chalex.eth, kiki\_dev, sashik\_eth
+
+
 ## Summary
 
-`USSD.sol#initialize` mint 10000 USSD without deposit any collateral
+The StableOracleWBTC contract utilizes a BTC/USD Chainlink oracle to determine the price of WBTC. However, this approach can lead to potential issues if WBTC were to depeg from BTC. In such a scenario, WBTC would no longer maintain an equivalent value to BTC. This can result in significant problems, including borrowing against a devalued asset and the accumulation of bad debt. Given that the protocol continues to value WBTC based on BTC/USD, the issuance of bad loans would persist, exacerbating the overall level of bad debt.
+
+Important to note that this is like a 2 in 1 report as the same idea could work on the StableOracleWBGL contract too.
 
 ## Vulnerability Detail
 
-The described in the whitepaper:
+The vulnerability lies in the reliance on a single BTC/USD Chainlink oracle to obtain the price of WBTC. If the bridge connecting WBTC to BTC becomes compromised and WBTC depegs, WBTC may depeg from BTC. Consequently, WBTC's value would no longer be equivalent to BTC, potentially rendering it worthless (hopefully this never happens). The use of the BTC/USD oracle to price WBTC poses risks to the protocol and its users.
 
-> USSD coin is ’initialized’ with one-time minting of 1000 USSD, taking 1000
-> DAI as collateral.
+The following code snippet represents the relevant section of the StableOracleWBTC contract responsible for retrieving the price of WBTC using the BTC/USD Chainlink oracle:
 
-But in the implementation, the `initialize` function does not deposit any DAI. And mint 10000 USSD instead of the 1000 USSD mentioned in the whitepaper.
+```solidity
+contract StableOracleWBTC is IStableOracle {
+    AggregatorV3Interface priceFeed;
+
+    constructor() {
+        priceFeed = AggregatorV3Interface(
+            0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419
+
+        );
+    }
+
+    function getPriceUSD() external view override returns (uint256) {
+        (, int256 price, , , ) = priceFeed.latestRoundData();
+        // chainlink price data is 8 decimals for WBTC/USD
+        return uint256(price) * 1e10;
+    }
+}
+```
+
+NB: key to note that the above pricefeed is set to the wrong aggregator, the correct one is this: `0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599`
 
 ## Impact
 
-Does not meet the white paper description, and may cause the initial state of USSD to be unstable (lack of sufficient collateral to resist depeg)
+Should the WBTC bridge become compromised or WBTC depeg from BTC, the protocol would face severe consequences. The protocol would be burdened with a substantial amount of bad debt stemming from outstanding loans secured by WBTC. Additionally, due to the protocol's reliance on the BTC/USD oracle, the issuance of loans against WBTC would persist even if its value has significantly deteriorated. This would lead to an escalation in bad debt, negatively impacting the protocol's financial stability and overall performance.
 
 ## Code Snippet
 
-https://github.com/USSDofficial/ussd-contracts/blob/f44c726371f3152634bcf0a3e630802e39dec49c/contracts/USSD.sol#L42
+[StableOracleWBTC.sol#L12-L26](https://github.com/sherlock-audit/2023-05-USSD/blob/6d7a9fdfb1f1ed838632c25b6e1b01748d0bafda/ussd-contracts/contracts/oracles/StableOracleWBTC.sol#L12-L26)
 
 ## Tool used
 
-Manual Review
+Manual review
 
 ## Recommendation
 
-It is recommended to mint 1000 USSD with 1000 DAI
+To mitigate the vulnerability mentioned above, it is strongly recommended to implement a double oracle setup for WBTC pricing. This setup would involve integrating both the BTC/USD Chainlink oracle and an additional on-chain liquidity-based oracle, such as UniV3 TWAP.
+
+The double oracle setup serves two primary purposes. Firstly, it reduces the risk of price manipulation by relying on the Chainlink oracle, which ensures accurate pricing for WBTC. Secondly, incorporating an on-chain liquidity-based oracle acts as a safeguard against WBTC depegging. By monitoring the price derived from the liquidity-based oracle and comparing it to the Chainlink oracle's price, borrowing activities can be halted if the threshold deviation (e.g., 2% lower) is breached.
+
+Adopting a double oracle setup enhances the protocol's stability and minimizes the risks associated with WBTC depegging. It ensures accurate valuation, reduces the accumulation of bad debt, and safeguards the protocol and its users
+
+
+
+
+## Discussion
+
+**Bauchibred**
+
+Escalate for 10 USDC
+
+
+
+I believe this issue has been incorrectly duplicated to #817. While I acknowledge the large number of issues submitted during the contest (approximately 1000), it's crucial to clarify that the concern here is not solely related to oracle addresses, despite the inclusion of wrong aggregators and inactive oracle addresses in the report. The main issue at hand is the potential depegging of WBTC, which is a bridged asset.
+
+To address this vulnerability, the recommendation proposes implementing a double oracle setup for WBTC pricing, which serves as a safeguard against WBTC depegging.
+
+To support this escalation, I have provided references to relevant cases:
+- #836 is a sponsor-validated issue that emphasizes the importance of not relying solely on 100% of an asset's oracle price. While it may not directly relate to this specific issue, it underscores the need to consider implementing a "deviation threshold" when determining asset prices, particularly in the context of bridged assets.
+-  #862, which is a valid duplicate, explores the potential impact of depegging on the protocol within a different context for this contest.
+- Additionally, references [1](https://github.com/sherlock-audit/2023-04-jojo-judging/blob/533cfb7357175fc97d6816586e95ad39e07892a7/060-M/320.md) and [2](https://github.com/sherlock-audit/2023-04-jojo-judging/blob/533cfb7357175fc97d6816586e95ad39e07892a7/060-M/104-best.md?plain=1#L5) are previous validated findings from other contests that further emphasize the standalone nature and significance of this issue.
+
+I believe these references provide additional insights into the importance of considering measures to mitigate risks associated with bridged assets and emphasize why this issue should be treated as a standalone concern.
+
+
+
+**sherlock-admin**
+
+ > Escalate for 10 USDC
+> 
+> 
+> 
+> I believe this issue has been incorrectly duplicated to #817. While I acknowledge the large number of issues submitted during the contest (approximately 1000), it's crucial to clarify that the concern here is not solely related to oracle addresses, despite the inclusion of wrong aggregators and inactive oracle addresses in the report. The main issue at hand is the potential depegging of WBTC, which is a bridged asset.
+> 
+> To address this vulnerability, the recommendation proposes implementing a double oracle setup for WBTC pricing, which serves as a safeguard against WBTC depegging.
+> 
+> To support this escalation, I have provided references to relevant cases:
+> - #836 is a sponsor-validated issue that emphasizes the importance of not relying solely on 100% of an asset's oracle price. While it may not directly relate to this specific issue, it underscores the need to consider implementing a "deviation threshold" when determining asset prices, particularly in the context of bridged assets.
+> -  #862, which is a valid duplicate, explores the potential impact of depegging on the protocol within a different context for this contest.
+> - Additionally, references [1](https://github.com/sherlock-audit/2023-04-jojo-judging/blob/533cfb7357175fc97d6816586e95ad39e07892a7/060-M/320.md) and [2](https://github.com/sherlock-audit/2023-04-jojo-judging/blob/533cfb7357175fc97d6816586e95ad39e07892a7/060-M/104-best.md?plain=1#L5) are previous validated findings from other contests that further emphasize the standalone nature and significance of this issue.
+> 
+> I believe these references provide additional insights into the importance of considering measures to mitigate risks associated with bridged assets and emphasize why this issue should be treated as a standalone concern.
+> 
+> 
+
+You've created a valid escalation for 10 USDC!
+
+To remove the escalation from consideration: Delete your comment.
+
+You may delete or edit your escalation comment anytime before the 48-hour escalation window closes. After that, the escalation becomes final.
+
+**twicek**
+
+Escalate for 10 USDC
+
+Comments from [Bauchibred](https://github.com/Bauchibred) regarding the fact that the present issue #310 is not a duplicate of #817 are correct.
+However, the main argument of this report is that:
+>WBTC may depeg from BTC
+
+The only fact that WBTC/BTC would depeg is questionable. Since it is issued by a centralized entity (BitGo) it should be treated as trusted, because the only way for it to depeg would be via an error of this centralized entity or if the DAO voted a malicious proposal. See for details: https://www.gemini.com/cryptopedia/wbtc-what-is-wrapped-bitcoin#section-how-w-btc-works
+
+Additionally, one of the justifications used to support the escalation regarding the deviation threshold mentioned in [#836 ](https://github.com/sherlock-audit/2023-05-USSD-judging/issues/836). There is no guarantee that the TWAP will not stay within the deviation threshold even in the (very) unlikely event that WBTC/BTC depegs if the depegging happens slowly.
+
+Regarding #862, this is not a duplicate to this report because DAI principal depeg risk comes from depegging of the underlying collateral reserves, which as we have seen is not possible for WBTC since the reserves are held by a centralized party. Also #862 specifically related to an overflow problem during a potential DAI depeg which is totally different than this report.
+
+These are all the reason why I think this report is invalid.
+
+
+**sherlock-admin**
+
+ > Escalate for 10 USDC
+> 
+> Comments from [Bauchibred](https://github.com/Bauchibred) regarding the fact that the present issue #310 is not a duplicate of #817 are correct.
+> However, the main argument of this report is that:
+> >WBTC may depeg from BTC
+> 
+> The only fact that WBTC/BTC would depeg is questionable. Since it is issued by a centralized entity (BitGo) it should be treated as trusted, because the only way for it to depeg would be via an error of this centralized entity or if the DAO voted a malicious proposal. See for details: https://www.gemini.com/cryptopedia/wbtc-what-is-wrapped-bitcoin#section-how-w-btc-works
+> 
+> Additionally, one of the justifications used to support the escalation regarding the deviation threshold mentioned in [#836 ](https://github.com/sherlock-audit/2023-05-USSD-judging/issues/836). There is no guarantee that the TWAP will not stay within the deviation threshold even in the (very) unlikely event that WBTC/BTC depegs if the depegging happens slowly.
+> 
+> Regarding #862, this is not a duplicate to this report because DAI principal depeg risk comes from depegging of the underlying collateral reserves, which as we have seen is not possible for WBTC since the reserves are held by a centralized party. Also #862 specifically related to an overflow problem during a potential DAI depeg which is totally different than this report.
+> 
+> These are all the reason why I think this report is invalid.
+> 
+
+You've created a valid escalation for 10 USDC!
+
+To remove the escalation from consideration: Delete your comment.
+
+You may delete or edit your escalation comment anytime before the 48-hour escalation window closes. After that, the escalation becomes final.
+
+**hrishibhat**
+
+@Bauchibred any further comments on the validity of the issue due? 
+
+**Bauchibred**
+
+@hrishibhat I still think issue should be valid and stand on its own, the reply to my escalation was that the idea of “WBTC depegging is not valid”, but I argue that that's wrong, Wrapped BTCs have depegged multiple times in the past, one of the popular instance being after the whole FTX saga, though fair enough that was soBTC, now worth around 7% of what it's supposed to be pegged to.
+
+Note that Chainlink even provides a separate price feed to query the WBTC/BTC price,seen [here](https://data.chain.link/ethereum/mainnet/crypto-other/wbtc-btc).
+
+So I still believe that the price of WBTC/USD for more accuracy should be calculated based on WBTC/BTC and BTC/USD price feeds instead of directly using the BTC/USD feed. 
+
+Additionally [this article](https://thebitcoinmanual.com/articles/why-wrapped-bitcoin-depeg/) from the bitcoin manual, could provide more insight on how and why wrapped bitcoins could depeg. 
+
+**hrishibhat**
+
+Result:
+Medium
+Has duplicates
+This is not a duplicate of #817 
+Considering this issue and other duplicates of this issue as a valid medium given the edge case possibility of WBTC de-pegging.
+
+**sherlock-admin**
+
+Escalations have been resolved successfully!
+
+Escalation status:
+- [Bauchibred](https://github.com/sherlock-audit/2023-05-USSD-judging/issues/310/#issuecomment-1604772582): accepted
+- [twicek](https://github.com/sherlock-audit/2023-05-USSD-judging/issues/310/#issuecomment-1605817251): rejected
 
 # Issue M-5: Inaccurate collateral factor calculation due to missing collateral asset 
 
@@ -841,7 +1316,361 @@ Manual Review
 ## Recommendation
 Ensure accurate calculations and maintain the integrity of the collateral factor metric in the protocol's risk management system.
 
-# Issue M-6: Using the collateral assets' oracle price at 100% of its value to mint USSD without a fee can be used for arbitrage. 
+# Issue M-6: Inconsistency handling of DAI as collateral in the BuyUSSDSellCollateral function 
+
+Source: https://github.com/sherlock-audit/2023-05-USSD-judging/issues/515 
+
+## Found by 
+0xRobocop, GimelSec, J4de, WATCHPUG, saidam017
+## Summary
+
+DAI is the base asset of the `USSD.sol` contract, when a rebalacing needs to occur during a peg-down recovery, collateral is sold for DAI, which then is used to buy USSD in the DAI / USSD uniswap pool. Hence, when DAI is the collateral, this is not sold because there no existe a path to sell DAI for DAI.
+
+## Vulnerability Detail
+
+The above behavior is handled when collateral is about to be sold for DAI, see the comment `no need to swap DAI` ([link to the code](https://github.com/sherlock-audit/2023-05-USSD/blob/6d7a9fdfb1f1ed838632c25b6e1b01748d0bafda/ussd-contracts/contracts/USSDRebalancer.sol#L117-L139)):
+
+```solidity
+if (collateralval > amountToBuyLeftUSD) {
+   // sell a portion of collateral and exit
+   if (collateral[i].pathsell.length > 0) {
+       uint256 amountBefore = IERC20Upgradeable(baseAsset).balanceOf(USSD);
+       uint256 amountToSellUnits = IERC20Upgradeable(collateral[i].token).balanceOf(USSD) * ((amountToBuyLeftUSD * 1e18 / collateralval) / 1e18) / 1e18;
+       IUSSD(USSD).UniV3SwapInput(collateral[i].pathsell, amountToSellUnits);
+       amountToBuyLeftUSD -= (IERC20Upgradeable(baseAsset).balanceOf(USSD) - amountBefore);
+       DAItosell += (IERC20Upgradeable(baseAsset).balanceOf(USSD) - amountBefore);
+   } 
+   else {
+       // no need to swap DAI
+       DAItosell = IERC20Upgradeable(collateral[i].token).balanceOf(USSD) * amountToBuyLeftUSD / collateralval;
+   }
+}
+
+else {
+   // @audit-issue Not handling the case where this is DAI as is done above.
+   // sell all or skip (if collateral is too little, 5% treshold)
+   if (collateralval >= amountToBuyLeftUSD / 20) {
+      uint256 amountBefore = IERC20Upgradeable(baseAsset).balanceOf(USSD);
+      // sell all collateral and move to next one
+      IUSSD(USSD).UniV3SwapInput(collateral[i].pathsell, IERC20Upgradeable(collateral[i].token).balanceOf(USSD));
+      amountToBuyLeftUSD -= (IERC20Upgradeable(baseAsset).balanceOf(USSD) - amountBefore);
+      DAItosell += (IERC20Upgradeable(baseAsset).balanceOf(USSD) - amountBefore);
+   }
+}
+```
+The problem is in the `else branch` of the first if statement `collateralval > amountToBuyLeftUSD`, which lacks the check `if (collateral[i].pathsell.length > 0)`
+
+## Impact
+
+A re-balancing on a peg-down recovery will fail if the `collateralval` of DAI is less than `amountToBuyLeftUSD` but greater than `amountToBuyLeftUSD / 20` since the DAI collateral does not have a sell path.
+
+## Code Snippet
+
+https://github.com/sherlock-audit/2023-05-USSD/blob/6d7a9fdfb1f1ed838632c25b6e1b01748d0bafda/ussd-contracts/contracts/USSDRebalancer.sol#L130-L139
+
+## Tool used
+
+Manual Review
+
+## Recommendation
+
+Handle the case as is the done on the if branch of `collateralval > amountToBuyLeftUSD`:
+
+```solidity
+if (collateral[i].pathsell.length > 0) {
+  // Sell collateral for DAI
+}
+else {
+ // No need to swap DAI
+}
+```
+
+
+
+
+## Discussion
+
+**0xRobocop**
+
+Escalate for 10 USDC
+
+This is not a duplicate of #111 
+
+This issue points to an inconsistency in handling DAI as a collateral during peg-down recovery scenarios. The contract will try to sell DAI, but DAI does not have a sell path, so the transaction will revert.
+
+```solidity
+if (collateralval > amountToBuyLeftUSD) {
+   // sell a portion of collateral and exit
+   if (collateral[i].pathsell.length > 0) {
+       uint256 amountBefore = IERC20Upgradeable(baseAsset).balanceOf(USSD);
+       uint256 amountToSellUnits = IERC20Upgradeable(collateral[i].token).balanceOf(USSD) * ((amountToBuyLeftUSD * 1e18 / collateralval) / 1e18) / 1e18;
+       IUSSD(USSD).UniV3SwapInput(collateral[i].pathsell, amountToSellUnits);
+       amountToBuyLeftUSD -= (IERC20Upgradeable(baseAsset).balanceOf(USSD) - amountBefore);
+       DAItosell += (IERC20Upgradeable(baseAsset).balanceOf(USSD) - amountBefore);
+   } 
+   else {
+       // no need to swap DAI
+       DAItosell = IERC20Upgradeable(collateral[i].token).balanceOf(USSD) * amountToBuyLeftUSD / collateralval;
+   }
+}
+
+else {
+   // @audit-issue Not handling the case where this is DAI as is done above.
+   // sell all or skip (if collateral is too little, 5% treshold)
+   if (collateralval >= amountToBuyLeftUSD / 20) {
+      uint256 amountBefore = IERC20Upgradeable(baseAsset).balanceOf(USSD);
+      // sell all collateral and move to next one
+      IUSSD(USSD).UniV3SwapInput(collateral[i].pathsell, IERC20Upgradeable(collateral[i].token).balanceOf(USSD));
+      amountToBuyLeftUSD -= (IERC20Upgradeable(baseAsset).balanceOf(USSD) - amountBefore);
+      DAItosell += (IERC20Upgradeable(baseAsset).balanceOf(USSD) - amountBefore);
+   }
+}
+```
+
+See the inconsistency on the upper `if` and `else` branches. The `else` branch may try to sell DAI, but DAI does not have a sell path.
+
+**sherlock-admin**
+
+ > Escalate for 10 USDC
+> 
+> This is not a duplicate of #111 
+> 
+> This issue points to an inconsistency in handling DAI as a collateral during peg-down recovery scenarios. The contract will try to sell DAI, but DAI does not have a sell path, so the transaction will revert.
+> 
+> ```solidity
+> if (collateralval > amountToBuyLeftUSD) {
+>    // sell a portion of collateral and exit
+>    if (collateral[i].pathsell.length > 0) {
+>        uint256 amountBefore = IERC20Upgradeable(baseAsset).balanceOf(USSD);
+>        uint256 amountToSellUnits = IERC20Upgradeable(collateral[i].token).balanceOf(USSD) * ((amountToBuyLeftUSD * 1e18 / collateralval) / 1e18) / 1e18;
+>        IUSSD(USSD).UniV3SwapInput(collateral[i].pathsell, amountToSellUnits);
+>        amountToBuyLeftUSD -= (IERC20Upgradeable(baseAsset).balanceOf(USSD) - amountBefore);
+>        DAItosell += (IERC20Upgradeable(baseAsset).balanceOf(USSD) - amountBefore);
+>    } 
+>    else {
+>        // no need to swap DAI
+>        DAItosell = IERC20Upgradeable(collateral[i].token).balanceOf(USSD) * amountToBuyLeftUSD / collateralval;
+>    }
+> }
+> 
+> else {
+>    // @audit-issue Not handling the case where this is DAI as is done above.
+>    // sell all or skip (if collateral is too little, 5% treshold)
+>    if (collateralval >= amountToBuyLeftUSD / 20) {
+>       uint256 amountBefore = IERC20Upgradeable(baseAsset).balanceOf(USSD);
+>       // sell all collateral and move to next one
+>       IUSSD(USSD).UniV3SwapInput(collateral[i].pathsell, IERC20Upgradeable(collateral[i].token).balanceOf(USSD));
+>       amountToBuyLeftUSD -= (IERC20Upgradeable(baseAsset).balanceOf(USSD) - amountBefore);
+>       DAItosell += (IERC20Upgradeable(baseAsset).balanceOf(USSD) - amountBefore);
+>    }
+> }
+> ```
+> 
+> See the inconsistency on the upper `if` and `else` branches. The `else` branch may try to sell DAI, but DAI does not have a sell path.
+
+You've created a valid escalation for 10 USDC!
+
+To remove the escalation from consideration: Delete your comment.
+
+You may delete or edit your escalation comment anytime before the 48-hour escalation window closes. After that, the escalation becomes final.
+
+**hrishibhat**
+
+@ctf-sec 
+
+**hrishibhat**
+
+Result:
+Medium
+Has duplicates
+
+**sherlock-admin**
+
+Escalations have been resolved successfully!
+
+Escalation status:
+- [0xRobocop](https://github.com/sherlock-audit/2023-05-USSD-judging/issues/515/#issuecomment-1605656433): accepted
+
+# Issue M-7: Risk of Incorrect Asset Pricing by StableOracle in Case of Underlying Aggregator Reaching minAnswer 
+
+Source: https://github.com/sherlock-audit/2023-05-USSD-judging/issues/598 
+
+## Found by 
+Bauchibred, BugBusters, Madalad, RaymondFam, T1MOH, TheNaubit, berlin-101, chalex.eth, kiki\_dev
+## Summary
+Chainlink aggregators have a built-in circuit breaker to prevent the price of an asset from deviating outside a predefined price range. This circuit breaker may cause the oracle to persistently return the minPrice instead of the actual asset price in the event of a significant price drop, as witnessed during the LUNA crash. 
+
+## Vulnerability Detail
+StableOracleDAI.sol, StableOracleWBTC.sol, and StableOracleWETH.sol utilize the ChainlinkFeedRegistry to fetch the price of the requested tokens.
+
+```solidity
+function latestRoundData(
+  address base,
+  address quote
+)
+  external
+  view
+  override
+  checkPairAccess()
+  returns (
+    uint80 roundId,
+    int256 answer,
+    uint256 startedAt,
+    uint256 updatedAt,
+    uint80 answeredInRound
+  )
+{
+  uint16 currentPhaseId = s_currentPhaseId[base][quote];
+  AggregatorV2V3Interface aggregator = _getFeed(base, quote);
+  require(address(aggregator) != address(0), "Feed not found");
+  (
+    roundId,
+    answer,
+    startedAt,
+    updatedAt,
+    answeredInRound
+  ) = aggregator.latestRoundData();
+  return _addPhaseIds(roundId, answer, startedAt, updatedAt, answeredInRound, currentPhaseId);
+}
+```
+ChainlinkFeedRegistry#latestRoundData extracts the linked aggregator and requests round data from it. If an asset's price falls below the minPrice, the protocol continues to value the token at the minPrice rather than its real value. This discrepancy could have the protocol end up [minting](https://github.com/sherlock-audit/2023-05-USSD/blob/main/ussd-contracts/contracts/USSD.sol#L151-L173) drastically larger amount of stableCoinAmount as well as returning a much bigger [collateral factor](https://github.com/sherlock-audit/2023-05-USSD/blob/main/ussd-contracts/contracts/USSD.sol#L179-L194).
+
+For instance, if TokenA's minPrice is $1 and its price falls to $0.10, the aggregator continues to report $1, rendering the related function calls to entail a value that is ten times the actual value.
+
+It's important to note that while Chainlink oracles form part of the OracleAggregator system and the use of a combination of oracles could potentially prevent such a situation, there's still a risk. Secondary oracles, such as Band, could potentially be exploited by a malicious user who can DDOS relayers to prevent price updates. Once the price becomes stale, the Chainlink oracle's price would be the sole reference, posing a significant risk.
+
+## Impact
+In the event of an asset crash (like LUNA), the protocol can be manipulated to handle calls at an inflated price.
+
+## Code Snippet
+https://github.com/sherlock-audit/2023-05-USSD/blob/main/ussd-contracts/contracts/oracles/StableOracleDAI.sol#L33-L53
+https://github.com/sherlock-audit/2023-05-USSD/blob/main/ussd-contracts/contracts/oracles/StableOracleWBTC.sol#L21-L26
+https://github.com/sherlock-audit/2023-05-USSD/blob/main/ussd-contracts/contracts/oracles/StableOracleWETH.sol#L21-L26
+
+## Tool used
+
+Manual Review
+
+## Recommendation
+StableOracle should cross-check the returned answer against the minPrice/maxPrice and revert if the answer is outside of these bounds:
+
+```solidity
+    (, int256 price, , uint256 updatedAt, ) = registry.latestRoundData(
+        token,
+        USD
+    );
+    
+    if (price >= maxPrice or price <= minPrice) revert();
+```
+This ensures that a false price will not be returned if the underlying asset's value hits the minPrice.
+
+# Issue M-8: `BuyUSSDSellCollateral()` always sells 0 amount if need to sell part of collateral 
+
+Source: https://github.com/sherlock-audit/2023-05-USSD-judging/issues/656 
+
+## Found by 
+J4de, T1MOH
+## Summary
+Due to rounding error there is misbehaviour in `BuyUSSDSellCollateral()` function. It results in selling 0 amount of collateral.
+
+## Vulnerability Detail
+Suppose the only collateral in protocol is 1 WBTC; 1 WBTC costs 30_000 USD;
+UniV3Pool DAI/ USSD has following liquidity: (3000e6 USSD, 2000e18 DAI)
+And also USSD is underpriced so call rebalance:
+```solidity
+    function rebalance() override public {
+      uint256 ownval = getOwnValuation(); // it low enough to dive into if statement (see line below) 
+      (uint256 USSDamount, uint256 DAIamount) = getSupplyProportion(); // (3000e6 USSD, 2000e18 DAI)
+      if (ownval < 1e6 - threshold) {
+        // peg-down recovery
+        BuyUSSDSellCollateral((USSDamount - DAIamount / 1e12)/2); //  500 * 1e6     = (3000e6 - 2000e18 / 1e12) / 2
+```
+Take a look into BuyUSSDSellCollateral (follow comments):
+```solidity
+    function BuyUSSDSellCollateral(uint256 amountToBuy) internal { // 500e6
+      CollateralInfo[] memory collateral = IUSSD(USSD).collateralList();
+      //uint amountToBuyLeftUSD = amountToBuy * 1e12 * 1e6 / getOwnValuation();
+      uint amountToBuyLeftUSD = amountToBuy * 1e12; // 500e18
+      uint DAItosell = 0;
+      // Sell collateral in order of collateral array
+      for (uint256 i = 0; i < collateral.length; i++) {
+        // 30_000e18 = 1e8 * 1e18 / 10**8 * 30_000e18 / 1e18
+        uint256 collateralval = IERC20Upgradeable(collateral[i].token).balanceOf(USSD) * 1e18 / (10**IERC20MetadataUpgradeable(collateral[i].token).decimals()) * collateral[i].oracle.getPriceUSD() / 1e18;
+        if (collateralval > amountToBuyLeftUSD) {
+          // sell a portion of collateral and exit
+          if (collateral[i].pathsell.length > 0) {
+            uint256 amountBefore = IERC20Upgradeable(baseAsset).balanceOf(USSD); // 0
+            // amountToSellUnits = 1e8 * ((500e18 * 1e18 / 30_000e18) / 1e18) / 1e18 = 1e8 * (0) / 1e18 = 0
+            uint256 amountToSellUnits = IERC20Upgradeable(collateral[i].token).balanceOf(USSD) * ((amountToBuyLeftUSD * 1e18 / collateralval) / 1e18) / 1e18;
+            // and finally executes trade of 0 WBTC
+            IUSSD(USSD).UniV3SwapInput(collateral[i].pathsell, amountToSellUnits);
+            amountToBuyLeftUSD -= (IERC20Upgradeable(baseAsset).balanceOf(USSD) - amountBefore); // 0 = 0 - 0
+            DAItosell += (IERC20Upgradeable(baseAsset).balanceOf(USSD) - amountBefore); // 0 += 0
+            ...
+```
+So protocol will not buy DAI and will not sell DAI for USSD in UniswapV3Pool to support peg of USSD to DAI
+
+## Impact
+Protocol is not able of partial selling of collateral for token. It block algorithmic pegging of USSD to DAI 
+
+## Code Snippet
+https://github.com/sherlock-audit/2023-05-USSD/blob/main/ussd-contracts/contracts/USSDRebalancer.sol#L121
+
+## Tool used
+
+Manual Review, VS Code
+
+## Recommendation
+Refactor formula of amountToSellUnits
+```solidity
+// uint256 amountToSellUnits = (decimals of collateral) * (DAI amount to get for sell) / (price of 1 token of collateral)
+uint256 amountToSellUnits = collateral[i].token).decimals() * amountToBuyLeftUSD / collateral[i].oracle.getPriceUSD()
+```
+
+
+
+
+## Discussion
+
+**T1MOH593**
+
+Escalate for 10 USDC
+
+This is not a duplicate of #111
+This report describes that partially collateral can't be sold, because `amountToSellUnits` is 0 due to rounding issue. Noticed #183 is similar to my issue
+
+**sherlock-admin**
+
+ > Escalate for 10 USDC
+> 
+> This is not a duplicate of #111
+> This report describes that partially collateral can't be sold, because `amountToSellUnits` is 0 due to rounding issue. Noticed #183 is similar to my issue
+
+You've created a valid escalation for 10 USDC!
+
+To remove the escalation from consideration: Delete your comment.
+
+You may delete or edit your escalation comment anytime before the 48-hour escalation window closes. After that, the escalation becomes final.
+
+**ctf-sec**
+
+I agree this issue and #183 are not duplicate of #111 and can be grouped together as a new valid medium, will see if this is a duplicate of other issue
+
+**hrishibhat**
+
+Result:
+Medium
+Has duplicates
+
+
+**sherlock-admin**
+
+Escalations have been resolved successfully!
+
+Escalation status:
+- [T1MOH593](https://github.com/sherlock-audit/2023-05-USSD-judging/issues/656/#issuecomment-1604582674): accepted
+
+# Issue M-9: Using the collateral assets' oracle price at 100% of its value to mint USSD without a fee can be used for arbitrage. 
 
 Source: https://github.com/sherlock-audit/2023-05-USSD-judging/issues/836 
 
@@ -874,4 +1703,362 @@ Manual Review
 ## Recommendation
 
 Consider adding a minting fee of 0.5% to 1% (should be higher than the deviation).
+
+
+
+## Discussion
+
+**0xRobocop**
+
+Escalate for 10 USDC
+
+This is not an issue, it assumes that a "real-time" price exists which is theoretically impossible. In reality there is no way to value a collateral precisely to a "real-time" price because this "price" does not exists and the markets are aligned thanks to arbitrageurs. 
+
+We cannot say that the chainlink price (if chainlink is behaving properly and contract consumes the prices safely) is below or above the "market-price", because there is no such "market-price", what we can say is that some market has a different price than chainlink's oracle. For example the ETH / DAI uniswap pool may have the price of 1 ETH for 996 DAI and chainlink's price may be 1 ETH for 1000 DAI. Watson argues that this scenario will:
+
+`cause the quality of the collateral for USSD to continuously decrease and the value to be leaked to the arbitragers.`
+
+Which is not true, what will happen is the next:
+
+- 1. User will send 1 ETH to the USSD protocol and receive 1000 USSD.
+- 2. User will change 1000 USSD for 1000 DAI.
+- 3. User will buy ETH in uniswap with the 1000 DAI and receive 1.004 ETH, driving up the price of ETH in uniswap.
+- 4. User will repeat the process until the uniswap price is equal to the chainlink price and the arbitrage is no longer possible.
+- 5. ETH price increased in the "below-price" market, making the ETH collateral of the USSD protocol more valuable across different markets.
+
+
+
+**sherlock-admin**
+
+ > Escalate for 10 USDC
+> 
+> This is not an issue, it assumes that a "real-time" price exists which is theoretically impossible. In reality there is no way to value a collateral precisely to a "real-time" price because this "price" does not exists and the markets are aligned thanks to arbitrageurs. 
+> 
+> We cannot say that the chainlink price (if chainlink is behaving properly and contract consumes the prices safely) is below or above the "market-price", because there is no such "market-price", what we can say is that some market has a different price than chainlink's oracle. For example the ETH / DAI uniswap pool may have the price of 1 ETH for 996 DAI and chainlink's price may be 1 ETH for 1000 DAI. Watson argues that this scenario will:
+> 
+> `cause the quality of the collateral for USSD to continuously decrease and the value to be leaked to the arbitragers.`
+> 
+> Which is not true, what will happen is the next:
+> 
+> - 1. User will send 1 ETH to the USSD protocol and receive 1000 USSD.
+> - 2. User will change 1000 USSD for 1000 DAI.
+> - 3. User will buy ETH in uniswap with the 1000 DAI and receive 1.004 ETH, driving up the price of ETH in uniswap.
+> - 4. User will repeat the process until the uniswap price is equal to the chainlink price and the arbitrage is no longer possible.
+> - 5. ETH price increased in the "below-price" market, making the ETH collateral of the USSD protocol more valuable across different markets.
+> 
+> 
+
+You've created a valid escalation for 10 USDC!
+
+To remove the escalation from consideration: Delete your comment.
+
+You may delete or edit your escalation comment anytime before the 48-hour escalation window closes. After that, the escalation becomes final.
+
+**twicek**
+
+Escalate for 10 USDC
+
+I agree with the comments made by 0xRobocop, this report describe a common scenario that lead to an arbitrage opportunity, which is not an issue.
+Hitting the deviation threshold will lead for the price to be updated earlier than usual which will naturally lead to the arbitrage opportunity described by 0xRobocop. Adding a minting fee could actually be more detrimental since it would prevent arbitrager from getting the USSD / DAI Pool to equilibrium.
+
+**sherlock-admin**
+
+ > Escalate for 10 USDC
+> 
+> I agree with the comments made by 0xRobocop, this report describe a common scenario that lead to an arbitrage opportunity, which is not an issue.
+> Hitting the deviation threshold will lead for the price to be updated earlier than usual which will naturally lead to the arbitrage opportunity described by 0xRobocop. Adding a minting fee could actually be more detrimental since it would prevent arbitrager from getting the USSD / DAI Pool to equilibrium.
+
+You've created a valid escalation for 10 USDC!
+
+To remove the escalation from consideration: Delete your comment.
+
+You may delete or edit your escalation comment anytime before the 48-hour escalation window closes. After that, the escalation becomes final.
+
+**ctf-sec**
+
+Agree with the escalation.
+
+**hrishibhat**
+
+Result:
+Medium
+Unique
+Considering this a valid medium. 
+Lead Watson comment:
+>  comment is basically describing the arbitrage CAN happen, the missing part there is ETH/DAI is a much deeper pool than USSD/DAI, the USSD/DAI pool will suffer a much bigger damage before the arbitrage opportunity disappears. This is not a common/natural scenario
+
+
+**sherlock-admin**
+
+Escalations have been resolved successfully!
+
+Escalation status:
+- [0xRobocop](https://github.com/sherlock-audit/2023-05-USSD-judging/issues/836/#issuecomment-1605228222): rejected
+- [twicek](https://github.com/sherlock-audit/2023-05-USSD-judging/issues/836/#issuecomment-1605860157): rejected
+
+# Issue M-10: If collateral factor is high enough, flutter ends up being out of bounds 
+
+Source: https://github.com/sherlock-audit/2023-05-USSD-judging/issues/889 
+
+## Found by 
+J4de, neumo
+## Summary
+In `USSDRebalancer` contract, function `SellUSSDBuyCollateral` will revert everytime a rebalance calls it, provided the collateral factor is greater than all the elements of the `flutterRatios` array.
+
+## Vulnerability Detail
+Function `SellUSSDBuyCollateral` calculates `flutter` as the lowest index of the `flutterRatios` array for which the collateral factor is smaller than the flutter ratio.
+```solidity
+uint256 cf = IUSSD(USSD).collateralFactor();
+uint256 flutter = 0;
+for (flutter = 0; flutter < flutterRatios.length; flutter++) {
+	if (cf < flutterRatios[flutter]) {
+	  break;
+	}
+}
+```
+The problem arises when, if collateral factor is greater than all flutter values, after the loop `flutter = flutterRatios.length`.
+
+This `flutter` value is used afterwards here:
+```solidity
+...
+if (collateralval * 1e18 / ownval < collateral[i].ratios[flutter]) {
+  portions++;
+}
+...
+```
+ And here:
+ ```solidity
+...
+if (collateralval * 1e18 / ownval < collateral[i].ratios[flutter]) {
+  if (collateral[i].token != uniPool.token0() || collateral[i].token != uniPool.token1()) {
+	// don't touch DAI if it's needed to be bought (it's already bought)
+	IUSSD(USSD).UniV3SwapInput(collateral[i].pathbuy, daibought/portions);
+  }
+}
+...
+```
+
+As we can see in the tests of the project, the flutterRatios array and the collateral ratios array are set to be of the same length, so if flutter = flutterRatios.length, any call to that index in the `ratios` array will revert with an index out of bounds.
+
+## Impact
+High, when the collateral factor reaches certain level, a rebalance that calls `SellUSSDBuyCollateral` will always revert.
+
+## Code Snippet
+https://github.com/sherlock-audit/2023-05-USSD/blob/main/ussd-contracts/contracts/USSDRebalancer.sol#L178-L184
+
+## Tool used
+Manual review.
+
+
+## Recommendation
+When checking `collateral[i].ratios[flutter]` always check first that flutter is `< flutterRatios.length`.
+
+
+
+
+
+## Discussion
+
+**neumoxx**
+
+Escalate for 10 USDC
+The issue is marked as duplicate of #940, and in that issue there's a comment from the judge that states `This is an admin input, requires admin error to cause problems`. The issue does not depend on an admin input to arise. The flutter ratios are set in the tests according to values mentioned in the whitepaper: https://github.com/sherlock-audit/2023-05-USSD/blob/6d7a9fdfb1f1ed838632c25b6e1b01748d0bafda/ussd-contracts/test/USSDsimulator.test.js#L391-L393. 
+The collateral factor:
+https://github.com/sherlock-audit/2023-05-USSD/blob/6d7a9fdfb1f1ed838632c25b6e1b01748d0bafda/ussd-contracts/contracts/USSD.sol#L179-L191
+can grow beyond the last value of the flutter ratios array and that would make the `SellUSSDBuyCollateral` function to revert.
+
+**sherlock-admin**
+
+ > Escalate for 10 USDC
+> The issue is marked as duplicate of #940, and in that issue there's a comment from the judge that states `This is an admin input, requires admin error to cause problems`. The issue does not depend on an admin input to arise. The flutter ratios are set in the tests according to values mentioned in the whitepaper: https://github.com/sherlock-audit/2023-05-USSD/blob/6d7a9fdfb1f1ed838632c25b6e1b01748d0bafda/ussd-contracts/test/USSDsimulator.test.js#L391-L393. 
+> The collateral factor:
+> https://github.com/sherlock-audit/2023-05-USSD/blob/6d7a9fdfb1f1ed838632c25b6e1b01748d0bafda/ussd-contracts/contracts/USSD.sol#L179-L191
+> can grow beyond the last value of the flutter ratios array and that would make the `SellUSSDBuyCollateral` function to revert.
+
+You've created a valid escalation for 10 USDC!
+
+To remove the escalation from consideration: Delete your comment.
+
+You may delete or edit your escalation comment anytime before the 48-hour escalation window closes. After that, the escalation becomes final.
+
+**ctf-sec**
+
+[here](https://github.com/sherlock-audit/2023-05-USSD/blob/6d7a9fdfb1f1ed838632c25b6e1b01748d0bafda/ussd-contracts/contracts/USSDRebalancer.sol#L62)
+
+```solidity
+    function setFlutterRatios(uint256[] calldata _flutterRatios) public onlyControl {
+      flutterRatios = _flutterRatios;
+    }
+```
+
+flutterRatios can be adjusted by admin
+
+Valid low
+
+**hrishibhat**
+
+Result:
+Medium
+Has duplicates
+This is a valid issue where the rebalance reverts in certain conditions due to the unexpected final loop flutter values. 
+
+**sherlock-admin**
+
+Escalations have been resolved successfully!
+
+Escalation status:
+- [neumoxx](https://github.com/sherlock-audit/2023-05-USSD-judging/issues/889/#issuecomment-1605375095): accepted
+
+# Issue M-11: Lack of Redeem Feature 
+
+Source: https://github.com/sherlock-audit/2023-05-USSD-judging/issues/958 
+
+## Found by 
+0xMosh, 0xRobocop, BugBusters, WATCHPUG, ast3ros, ctf\_sec, juancito, sashik\_eth, shealtielanz, shogoki, the\_endless\_sea, ustas
+## Summary
+
+## Vulnerability Detail
+
+The whitepaper mentions a redeeming feature that allows the user to redeem USSD for DAI (see section 4 "Mint and redeem"), but it is currently missing from the implementation.
+
+Although there is a "redeem" boolean in the collateral settings, there is no corresponding feature that enables the redemption of USSD to any of the underlying collateral assets.
+
+## Impact
+
+## Code Snippet
+
+https://github.com/sherlock-audit/2023-05-USSD/blob/main/ussd-contracts/contracts/interfaces/IUSSDRebalancer.sol#L13-L21
+
+## Tool used
+
+Manual Review
+
+## Recommendation
+
+Revise the whitepaper and docs to reflect the fact that there is no redeem function or add a redeem function.
+
+
+
+## Discussion
+
+**securitygrid**
+
+Escalate for 10 USDC
+This is valid low/info.
+So far, lacking redeem is no impact.
+
+**sherlock-admin**
+
+ > Escalate for 10 USDC
+> This is valid low/info.
+> So far, lacking redeem is no impact.
+
+You've created a valid escalation for 10 USDC!
+
+To remove the escalation from consideration: Delete your comment.
+
+You may delete or edit your escalation comment anytime before the 48-hour escalation window closes. After that, the escalation becomes final.
+
+**0xJuancito**
+
+Escalate for 10 USDC
+
+This is a valid High. 
+
+--- 
+
+Escalating the comment:
+
+> This is valid low/info.
+> So far, lacking redeem is no impact.
+
+--- 
+
+The impact is explained on the whitepaper and quoted on the "Vulnerability Detail" section from issue https://github.com/sherlock-audit/2023-05-USSD-judging/issues/218:
+
+As per the [USSD whitepaper](https://github.com/USSDofficial/ussd-whitepaper/blob/main/whitepaper.pdf):
+
+> If there is positive DAI balance in the collateral, USSD contract can provide
+DAI for equal amount of USSD in return (that would be burned, contracting
+supply).
+
+The importance of this is said here:
+
+> Ability to mint and redeem USSD for DAI could serve as incentives to rebalance the coin when this is economically viable
+
+And the most important feature is to have a mechanism to "help USSD recover in negative scenarios":
+
+> These methods also could be used to help USSD recover in negative scenarios:
+if USSD value falls below 1 DAI and there are less than 1 DAI reserves per USSD
+to refill the reserves allowing the USSD to recover it’s price by reducing supply
+
+**sherlock-admin**
+
+ > Escalate for 10 USDC
+> 
+> This is a valid High. 
+> 
+> --- 
+> 
+> Escalating the comment:
+> 
+> > This is valid low/info.
+> > So far, lacking redeem is no impact.
+> 
+> --- 
+> 
+> The impact is explained on the whitepaper and quoted on the "Vulnerability Detail" section from issue https://github.com/sherlock-audit/2023-05-USSD-judging/issues/218:
+> 
+> As per the [USSD whitepaper](https://github.com/USSDofficial/ussd-whitepaper/blob/main/whitepaper.pdf):
+> 
+> > If there is positive DAI balance in the collateral, USSD contract can provide
+> DAI for equal amount of USSD in return (that would be burned, contracting
+> supply).
+> 
+> The importance of this is said here:
+> 
+> > Ability to mint and redeem USSD for DAI could serve as incentives to rebalance the coin when this is economically viable
+> 
+> And the most important feature is to have a mechanism to "help USSD recover in negative scenarios":
+> 
+> > These methods also could be used to help USSD recover in negative scenarios:
+> if USSD value falls below 1 DAI and there are less than 1 DAI reserves per USSD
+> to refill the reserves allowing the USSD to recover it’s price by reducing supply
+
+You've created a valid escalation for 10 USDC!
+
+To remove the escalation from consideration: Delete your comment.
+
+You may delete or edit your escalation comment anytime before the 48-hour escalation window closes. After that, the escalation becomes final.
+
+**abhishekvispute**
+
+well this is what protocol team said that time regarding redeem 
+that it is intentional 
+
+![image](https://github.com/sherlock-audit/2023-05-USSD-judging/assets/46760063/a3c4378e-eab2-4a1a-946a-f5107f756dbc)
+
+
+**ctf-sec**
+
+> well this is what protocol team said that time regarding redeem that it is intentional
+> 
+> ![image](https://user-images.githubusercontent.com/46760063/248562171-a3c4378e-eab2-4a1a-946a-f5107f756dbc.png)
+
+valid low based on the sponsor's feedback
+
+**hrishibhat**
+
+Result:
+Medium
+Has duplicates
+This issue can be considered a valid medium based on the Whitepaper description of the importance of having a the redeem function.
+
+**sherlock-admin**
+
+Escalations have been resolved successfully!
+
+Escalation status:
+- [0xJuancito](https://github.com/sherlock-audit/2023-05-USSD-judging/issues/958/#issuecomment-1604979329): accepted
+- [securitygrid](https://github.com/sherlock-audit/2023-05-USSD-judging/issues/958/#issuecomment-1604576035): rejected
 
